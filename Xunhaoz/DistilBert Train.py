@@ -2,15 +2,16 @@ import json
 import time
 import warnings
 import pandas as pd
+import numpy as np
 import torch
 from torch import nn
-from sklearn.model_selection import train_test_split
-from transformers import BertModel, BertTokenizer
+from sklearn.preprocessing import LabelBinarizer
+from transformers import DistilBertModel, DistilBertTokenizer
 from torch.utils.data import Dataset, DataLoader
 
 warnings.filterwarnings("ignore")
-BATCH_SIZE = 6
-LEARNING_RATE = 1e-3
+BATCH_SIZE = 2
+LEARNING_RATE = 1e-5
 EPOCH = 500
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -20,12 +21,13 @@ class MLPClassifier(nn.Module):
         super(MLPClassifier, self).__init__()
         self.dropout = nn.Dropout(dropout_rate)
         self.hidden_layer = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
         self.output_layer = nn.Linear(hidden_size, output_size)
-        self.log_softmax = nn.LogSoftmax()
 
     def forward(self, x):
         x = self.dropout(x)
         x = self.hidden_layer(x)
+        x = self.relu(x)
         x = self.output_layer(x)
         return x
 
@@ -38,55 +40,44 @@ class CombinedModel(nn.Module):
 
     def forward(self, input_ids, attention_mask):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        pooled_output = outputs.pooler_output
+        pooled_output = outputs.last_hidden_state.mean(dim=1)
         return self.classifier(pooled_output)
 
 
 class CustomDataset(Dataset):
     def __init__(self, df: pd.DataFrame):
-        self.df = df.reset_index(drop=True)
+        self.news_content = df["news_content"].to_numpy()
+        self.impact_type = LabelBinarizer().fit_transform(df.impact_type).astype(np.float32)
 
     def __len__(self):
-        return len(self.df)
+        return len(self.news_content)
 
     def __getitem__(self, idx):
-        return {'text': self.df['news_content'][idx], 'label': self.df['impact_type'][idx]}
+        return {'text': self.news_content[idx], 'label': self.impact_type[idx]}
 
 
-def get_model(model_name='bert-large-cased', hidden_dim=1024, output_dim=2, dropout_rate=0.2):
+def get_model(model_name='distilbert-base-uncased', hidden_dim=256, output_dim=5, dropout_rate=0.2):
     model_name = model_name
 
-    tokenizer = BertTokenizer.from_pretrained(model_name)
-    bert_model = BertModel.from_pretrained(model_name)
+    tokenizer = DistilBertTokenizer.from_pretrained(model_name)
+    XLNet_model = DistilBertModel.from_pretrained(model_name)
 
-    input_dim = bert_model.config.hidden_size
+    input_dim = XLNet_model.config.hidden_size
     hidden_dim = hidden_dim
     output_dim = output_dim
     dropout_rate = dropout_rate
 
     classifier = MLPClassifier(input_dim, hidden_dim, output_dim, dropout_rate)
-    classifier = CombinedModel(bert_model, classifier)
+    classifier = CombinedModel(XLNet_model, classifier)
     return tokenizer, classifier.to(DEVICE)
 
 
 def get_data(batch_size=64):
-    with open("../static/ML-ESG-2_English_Train.json", "r") as f:
-        all_dataset = json.load(f)
+    train_df = pd.read_csv("static/Train.csv")[["news_content", "impact_type"]]
+    dev_df = pd.read_csv("static/Dev.csv")[["news_content", "impact_type"]]
 
-    all_dataset_df = pd.DataFrame(all_dataset)[['news_content', 'impact_type']]
-    all_dataset_df['impact_type'] = all_dataset_df['impact_type'].apply(lambda x: 1 if x == "Opportunity" else 0)
-    risk_dataset_df = all_dataset_df[all_dataset_df['impact_type'] == 0]
-    opportunity_dataset_df = all_dataset_df[all_dataset_df['impact_type'] == 1]
-
-    train_risk_dataset_df, val_risk_dataset_df = train_test_split(risk_dataset_df, test_size=0.3, random_state=42)
-    train_opportunity_dataset_df, val_opportunity_dataset_df = train_test_split(opportunity_dataset_df, test_size=0.3,
-                                                                                random_state=42)
-
-    train_dataset = pd.concat([train_risk_dataset_df] * 6 + [train_opportunity_dataset_df])
-    train_dataset = CustomDataset(train_dataset)
-
-    val_dataset = pd.concat([val_risk_dataset_df] * 6 + [val_opportunity_dataset_df])
-    val_dataset = CustomDataset(val_dataset)
+    train_dataset = CustomDataset(train_df)
+    val_dataset = CustomDataset(dev_df)
 
     return DataLoader(train_dataset, batch_size=batch_size, shuffle=True), \
         DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
@@ -98,9 +89,9 @@ def train_model(tokenizer, classifier, criterion, optimizer, train_loader):
 
     classifier.train()
     for batch in train_loader:
-        input_ids = tokenizer(batch['text'], return_tensors='pt', padding=True, truncation=True)['input_ids'].to(DEVICE)
-        attention_mask = tokenizer(batch['text'], return_tensors='pt', padding=True, truncation=True)[
-            'attention_mask'].to(DEVICE)
+        tokenizer_res = tokenizer(batch['text'], return_tensors='pt', padding=True)
+        input_ids = tokenizer_res['input_ids'].to(DEVICE)
+        attention_mask = tokenizer_res['attention_mask'].to(DEVICE)
         labels = torch.tensor(batch['label']).to(DEVICE)
 
         optimizer.zero_grad()
@@ -110,7 +101,8 @@ def train_model(tokenizer, classifier, criterion, optimizer, train_loader):
         optimizer.step()
 
         train_loss += loss.item()
-        _, output = torch.max(output, 1)
+        output = torch.argmax(output, dim=1)
+        labels = torch.argmax(labels, dim=1)
         train_acc += (labels == output).sum().item()
 
     train_loss /= len(train_loader)
@@ -126,17 +118,18 @@ def valid_model(tokenizer, classifier, criterion, val_loader):
     classifier.eval()
     with torch.no_grad():
         for batch in val_loader:
-            input_ids = tokenizer(batch['text'], return_tensors='pt', padding=True, truncation=True)['input_ids'].to(
-                DEVICE)
-            attention_mask = tokenizer(batch['text'], return_tensors='pt', padding=True, truncation=True)[
-                'attention_mask'].to(DEVICE)
+            tokenizer_res = tokenizer(batch['text'], return_tensors='pt', padding=True)
+            input_ids = tokenizer_res['input_ids'].to(DEVICE)
+            attention_mask = tokenizer_res['attention_mask'].to(DEVICE)
             labels = torch.tensor(batch['label']).to(DEVICE)
 
             output = classifier(input_ids, attention_mask)
+
             loss = criterion(output, labels)
 
             valid_loss += loss.item()
-            _, output = torch.max(output, 1)
+            output = torch.argmax(output, dim=1)
+            labels = torch.argmax(labels, dim=1)
             valid_acc += (labels == output).sum().item()
 
     valid_loss /= len(val_loader)
@@ -157,5 +150,5 @@ if __name__ == "__main__":
         train_loss, train_acc = train_model(tokenizer, classifier, criterion, optimizer, train_loader)
         valid_loss, valid_acc = valid_model(tokenizer, classifier, criterion, val_loader)
         print(
-            f"epoch:{epoch: 03d} train cost: {time.time() - t1: 0.2f}s, train_loss: {train_loss: 0.4f}, train_acc: {train_acc: 0.4f}, valid_loss: {valid_loss: 0.4f}, valid_acc: {valid_acc: 0.4f}")
-        torch.save(classifier, f"epoch {epoch}.pt")
+            f"epoch:{epoch: 03d} train cost: {time.time() - t1: 0.2f}s, train_loss: {train_loss: 0.4f}, train_acc: {train_acc / BATCH_SIZE: 0.4f}, valid_loss: {valid_loss: 0.4f}, valid_acc: {valid_acc / BATCH_SIZE: 0.4f}")
+        torch.save(classifier, f"DistilBert Model/epoch {epoch}.pt")
