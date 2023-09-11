@@ -10,7 +10,7 @@ from transformers import DistilBertModel, DistilBertTokenizer
 from torch.utils.data import Dataset, DataLoader
 
 warnings.filterwarnings("ignore")
-BATCH_SIZE = 2
+BATCH_SIZE = 10
 LEARNING_RATE = 1e-5
 EPOCH = 500
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -89,7 +89,7 @@ def train_model(tokenizer, classifier, criterion, optimizer, train_loader):
 
     classifier.train()
     for batch in train_loader:
-        tokenizer_res = tokenizer(batch['text'], return_tensors='pt', padding=True)
+        tokenizer_res = tokenizer(batch['text'], return_tensors='pt', padding=True, truncation=True)
         input_ids = tokenizer_res['input_ids'].to(DEVICE)
         attention_mask = tokenizer_res['attention_mask'].to(DEVICE)
         labels = torch.tensor(batch['label']).to(DEVICE)
@@ -118,7 +118,7 @@ def valid_model(tokenizer, classifier, criterion, val_loader):
     classifier.eval()
     with torch.no_grad():
         for batch in val_loader:
-            tokenizer_res = tokenizer(batch['text'], return_tensors='pt', padding=True)
+            tokenizer_res = tokenizer(batch['text'], return_tensors='pt', padding=True, truncation=True)
             input_ids = tokenizer_res['input_ids'].to(DEVICE)
             attention_mask = tokenizer_res['attention_mask'].to(DEVICE)
             labels = torch.tensor(batch['label']).to(DEVICE)

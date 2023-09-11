@@ -52,7 +52,7 @@ def get_data():
 if __name__ == "__main__":
 
     tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-    model = torch.load("DistilBert Model/epoch 18.pt").to('cpu')
+    model = torch.load("DistilBert Model/epoch 15.pt").to('cpu')
 
     output_list = []
     all_df = get_data()
